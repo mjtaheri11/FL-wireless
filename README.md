@@ -3,7 +3,7 @@
 ## Setting up development environment
 [![Python 3.8, 3.10](https://img.shields.io/badge/python-3.8,3.10-blue.svg)](https://www.python.org/downloads/release/python-360/)
 ## 1. Setting up development environment
-let's have fun and then complete this part
+this project is the python implementation of the paper **[A Joint Learning and Communications Framework for Federated Learning over Wireless Networks](https://ieeexplore.ieee.org/document/9210812)**  
 
 ### Python Version Preparation
 ### Package manager

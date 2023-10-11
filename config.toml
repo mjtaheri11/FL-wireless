@@ -1,0 +1,16 @@
+[model_hyperparameters]
+input_size = 784
+hidden_size = 50
+num_classes = 10
+
+
+[channel_parameters]
+delay_requirement = 0.5             # delay requirement
+energy_requirement = 0.003          # energy requirement
+user_max_power = 0.01               # Here, we use maximum power. One can also optimize it according to the delay and energy requirements
+bs_max_power = 1                    # base station max power
+psi = 1e-27                         # energy consumption coefficient depending on the chip of each user i’s device
+omega_i = 40                        # number of CPU cycles required for computing per bit data of user i
+theta = 1e-9                        # frequency of the central processing unit
+uplink_bandwidth = 1
+downlink_bandwidth = 20
