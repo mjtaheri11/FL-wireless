@@ -1,33 +1,56 @@
 import argparse
 import random
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 
 import torch
 import torch.nn as nn
 import torchvision.datasets
 import numpy as np
 import torchvision.transforms as transforms
+import torch.nn.functional as F  # Parameterless functions, like (some) activation functions
 from torch.utils.data import DataLoader
 import torch.optim as optim
-# from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from munkres import Munkres
+from tqdm import tqdm
 
 from config import config
+from log import simple_logger
 
+
+
+torch.manual_seed(0)
+np.random.seed(0)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class NeuralNet(nn.Module):
-    def __init__(self, input_size, hidden_size, num_classes):
+    def __init__(self, in_channels=1, num_classes=10):
         super(NeuralNet, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, num_classes)
+        self.conv1 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=8,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.conv2 = nn.Conv2d(
+            in_channels=8,
+            out_channels=16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        self.fc1 = nn.Linear(16 * 7 * 7, num_classes)
 
     def forward(self, x):
-        out = self.fc1(x)
-        out = self.relu(out)
-        out = self.fc2(out)
-        return out
-
+        x = F.relu(self.conv1(x))
+        x = self.pool(x)
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)
+        x = x.reshape(x.shape[0], -1)
+        x = self.fc1(x)
+        return x
 
 def packet_error_calculator(distance_matrix, channel_interference, user_max_power):
     # bandwidth and m was a little tricky. so we just used some certain integers
@@ -55,11 +78,10 @@ def train(args):
     # hungarian algorithm object
     mnkr = Munkres()
     # number of training datasamples for each device. 
-    datanumber = [100, 200, 300, 400, 500, 400, 300, 200, 100, 200, 300, 400, 500, 600, 100, 200, 300, 400, 500, 100]  
+    datanumber = [1000, 2000, 3000, 4000, 5000, 4000, 3000, 2000, 1000, 2000, 3000, 4000, 5000, 6000, 1000, 2000, 3000, 4000, 4000, 1000]  
     # Interference over downlink 
     channel_interference_downlink = 0.06 * 0.000003        
     # Device configuration
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -78,7 +100,7 @@ def train(args):
         channel_interference = (np.array([0.03, 0.06, 0.07, 0.08,  0.1, 0.11, 0.12, 0.14, 0.15])-0.04)*0.000001  # Interference over each RB
 
     num_resource_blocks = len(channel_interference)
-    # writer = SummaryWriter()
+    writer = SummaryWriter()
 
     for average in range(1, args.averagenumber + 1):
         # The distance between the users and the BS
@@ -107,9 +129,9 @@ def train(args):
 
             # Create the model
             model = NeuralNet(
-                config["model_hyperparameters"]["input_size"],
-                config["model_hyperparameters"]["hidden_size"],
-                config["model_hyperparameters"]["num_classes"]
+                config["model_hyperparameters"]["num_channels"],
+                # config["model_hyperparameters"]["num_channels"],
+                # config["model_hyperparameters"]["num_channels"]
                 ).to(device)
             
             models[network_user] = model
@@ -123,15 +145,15 @@ def train(args):
         delayd = np.divide(Z, rated)                                   
         # Sum downlink delay of each user
         totaldelay = delayu + delayd                                   
-
         # Sum energy consumption of each user
-        totalenergy = per_user_total_energy_calculator(Z,
-                                                        delayu,
-                                                        config['channel_parameters']['psi'],
-                                                        config['channel_parameters']['omega_i'],
-                                                        config['channel_parameters']['theta'],
-                                                        config["channel_parameters"]["user_max_power"],
-                                                        )
+        totalenergy = per_user_total_energy_calculator(
+            Z,
+            delayu,
+            config['channel_parameters']['psi'],
+            config['channel_parameters']['omega_i'],
+            config['channel_parameters']['theta'],
+            config["channel_parameters"]["user_max_power"],
+            )
         
         # ============ proposed algorithm ============ 
         # edge matrix for Hungarian algorithm 
@@ -168,16 +190,17 @@ def train(args):
     
     users_per_iteration = defaultdict(list)
     error = np.zeros((args.iteration, 1))
+    global_weights = {}
     iterationtime = np.zeros((args.iteration, 1))
     
     
     if len(np.where(finalq < 1)[0]) > 0:
-        for iteration in range(args.iteration):
+        for iteration in tqdm(range(args.iteration), total=args.iteration):
             for user in range(args.user_number):
                 if (iteration == 0 and finalq[0, user] != 1) or random.random() > finalq[0, user]:
 
                     #  set the users in each iteration
-                    users_per_iteration[iteration].append(user)                 
+                    users_per_iteration[iteration].append(user)              
                     # Set input data
                     user_train_dataset = [(train_dataset[i][0], train_dataset[i][1]) for i in range(sum(datanumber[:user]), sum(datanumber[:user+1]))]     
                     train_loader = DataLoader(dataset=user_train_dataset, batch_size=args.batch_size, shuffle=True)
@@ -188,12 +211,15 @@ def train(args):
 
                     # Training loop
                     total_step = len(train_loader)
-                    for i, (images, labels) in enumerate(train_loader):
-                        images = images.reshape(-1, 28*28).to(device)
+                    model = models[f"model_{user}"]
+                    model.train()
+                    for step, (images, labels) in enumerate(train_loader):
+                        # images = images.reshape(-1, 28*28).to(device)
+                        images = images.to(device)
                         labels = labels.to(device)
 
                         # Forward pass
-                        outputs = models[f"model_{user}"](images)
+                        outputs = model(images)
                         loss = criterion(outputs, labels)
 
                         # Backward and optimize
@@ -201,52 +227,78 @@ def train(args):
                         loss.backward()
                         optimizer.step()
 
-                        if (i+1) % 50 == 0:
-                            print(f'model for user {user} Step [{i+1}/{total_step}], Loss: {loss.item()}')
+                        if (step) % 50 == 0:
+                            simple_logger(f'model for user {user} Step [{iteration * total_step + step + 1}/{total_step}], Loss: {loss.item()}')
+                        
+                        writer.add_scalar(f'model_{user}/Loss/train', loss.item(), iteration * total_step + step)
+
+                    models[f"model_{user}"] = model
 
             # ============ calculate the global FL model ============
             # calculate the number of users join the FL iteration i
+            simple_logger(f"the users performed FL in iteration: {iteration + 1} equals {users_per_iteration[iteration]}")
             if len(users_per_iteration[iteration]) > 0:
-                global_weights = models[f"model_0"].state_dict()
                 for j, _user in enumerate(users_per_iteration[iteration]):
                     if iteration == 0 and j == 0:  
-                        for layer_name in global_weights.keys():
-                            global_weights[layer_name] = models[f"model_{_user}"].state_dict()[layer_name] * datanumber[_user]
+                        for layer_name in models["model_0"].state_dict():
+                            temp_model = models[f"model_{_user}"]
+                            temp_model.eval()
+                            global_weights[layer_name] = temp_model.state_dict()[layer_name] * datanumber[_user] / sum([datanumber[val] for val in users_per_iteration[iteration]])
                     else:
-                        for layer_name in global_weights.keys():
-                            global_weights[layer_name] += models[f"model_{_user}"].state_dict()[layer_name] * datanumber[_user]
-                
-                # divide the total number of data samples 
-                for layer_name in models["model_0"].state_dict():
-                    global_weights[layer_name] /= sum([datanumber[val] for val in users_per_iteration[iteration]])                   
+                        for layer_name in models["model_0"].state_dict():
+                            temp_model = models[f"model_{_user}"]
+                            temp_model.eval()
+                            global_weights[layer_name] += temp_model.state_dict()[layer_name] * datanumber[_user] / sum([datanumber[val] for val in users_per_iteration[iteration]])
                             
                 # Create the global model
                 global_model = NeuralNet(
-                    config["model_hyperparameters"]["input_size"],
-                    config["model_hyperparameters"]["hidden_size"],
-                    config["model_hyperparameters"]["num_classes"]
+                    config["model_hyperparameters"]["num_channels"],
+                    # config["model_hyperparameters"]["hidden_size"],
+                    # config["model_hyperparameters"]["num_classes"]
                     ).to(device)
 
                 # load the weights
-                global_model.load_state_dict(global_weights)
-                                    
-                # Evaluation
-                global_model.eval()
-                with torch.no_grad():
-                    correct = 0
-                    total = 0
-                    for images, labels in test_loader:
-                        images = images.reshape(-1, 28*28).to(device)
-                        labels = labels.to(device)
-                        outputs = global_model(images)
-                        _, predicted = torch.max(outputs.data, 1)
-                        total += labels.size(0)
-                        correct += (predicted == labels).sum().item()
+                global_model.load_state_dict(global_weights)    
+                # Evaluation    
+                evaluate(global_model, test_loader, writer, criterion)
+                # update local models
+                simple_logger(
+                    "all local models updated to global model"
+                )
+                models = {_user: global_model for _user in models}
+            
 
-                    test_accuracy = 100 * correct / total
-                    print(f'Test Accuracy of the model on the 10000 test images: {test_accuracy}%')                    
+def evaluate(model,
+             test_loader,
+             writer,
+             criterion
+             ):
+    
+    model.eval()
+    
+    with torch.no_grad():
+        correct = 0
+        total = 0
+        all_loss = []
+        for images, labels in test_loader:
+            # images = images.reshape(-1, 28*28).to(device)
+            images = images.to(device)
+            labels = labels.to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            loss = criterion(outputs, labels)
+            all_loss.append(loss)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
+        test_accuracy = 100 * correct / total
+        simple_logger(f'Test Accuracy of the model on the 10000 test images: {test_accuracy}%')
+        writer.add_scalar("accuracy/test/global_model", test_accuracy)
+        writer.add_scalar("loss/test/global_model", sum(all_loss) / len(all_loss))
 
+    model.train()
+    
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -259,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=4,
+        default=1000,
         help="batch size of the model",
         )
     
@@ -273,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=0.001,
+        default=0.003,
         help="learning rate",
         )
     
@@ -288,7 +340,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--user_number",
         type=int,
-        default=9,
+        default=12,
         help="Total number of users that implement FL",
         )
     
